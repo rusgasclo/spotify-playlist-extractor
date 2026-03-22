@@ -5,7 +5,7 @@ import re
 import os
 from resolve_tracks import find_real_track_path
 
-USER_PROFILE_URL = "https://open.spotify.com/playlist/XXXXXXX" #OR "https://open.spotify.com/user/XXXXX/playlists" # <-- change this to your Spotify playlists page or a specific playlist URL
+USER_PROFILE_URL = "https://open.spotify.com/user/XXXXXX/playlists" #"https://open.spotify.com/user/XXXXX/playlists" OR "https://open.spotify.com/playlist/XXXXXXXXXXXXXXXX" # <-- change this to your Spotify playlists page or a specific playlist URL
 MUSIC_ROOT = r""  # <-- change this to your music library root
 
 DEBUG = True
@@ -254,7 +254,7 @@ def get_playlist_scroll_container(page):
     """
     debug("Searching for scrollable container...")
 
-    # First, let's find all potentially scrollable elements
+    # Find potentially scrollable elements
     scrollable_elements = page.evaluate("""
         () => {
             const elements = [];
@@ -443,7 +443,7 @@ def scroll_playlist(page, track_count):
             if not element_handle:
                 continue
 
-            _scroll_until_stable(element_handle, max_scrolls=10, stable_limit=3)
+            _scroll_until_stable(element_handle, max_scrolls=15, stable_limit=3) #set max_scrolls for playlist
 
     debug(f"Scroll done, unique tracks = {len(active_links)}/{track_count}")
     return active_links, collected_tracks
@@ -510,6 +510,10 @@ def write_m3u(playlist_name, tracks, MUSIC_ROOT):
             safe_album = sanitize_filename(album)
             safe_title = sanitize_filename(title)
 
+            # Remove album name from title if it appears at the end (Spotify sometimes includes it)
+            if safe_album and safe_title.lower().endswith(safe_album.lower()):
+                safe_title = safe_title[:-len(safe_album)].rstrip(' -').rstrip()
+
             # Try to find the real file (with track number + correct extension)
             real_path = find_real_track_path(
                 MUSIC_ROOT,
@@ -528,6 +532,8 @@ def write_m3u(playlist_name, tracks, MUSIC_ROOT):
                 # Not found — write fallback and warn
                 fallback = f"./{safe_artist}/{safe_album}/{safe_title}.flac"
                 f.write(fallback + "\n")
+                # Print unresolved track info so the user can see fail-to-map entries
+                debug(f"UNRESOLVED: {artist} - {title} (album: {album})")
 
     print(f"Saved playlist: {filepath}")
 

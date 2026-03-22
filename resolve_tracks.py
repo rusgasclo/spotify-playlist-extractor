@@ -68,8 +68,7 @@ def find_best_match(root, target):
 
 def find_real_track_path(MUSIC_ROOT, artist, album, title):
     """Find a real track path in the music library based on metadata."""
-    # Normalize MUSIC_ROOT
-    MUSIC_ROOT = normalize_path(MUSIC_ROOT)
+    # Keep original MUSIC_ROOT for filesystem operations
 
     # Candidate artist folders:
     candidates = []
@@ -150,9 +149,14 @@ def parse_m3u(filepath):
             # Next line should be the path
             if i + 1 < len(lines):
                 path = lines[i + 1].rstrip()
+                
+                # Try to extract album from the file path
+                # Paths often look like: ./artist/album/track.mp3
+                album = extract_album_from_path(path)
+                
                 tracks.append({
                     "artist": artist,
-                    "album": "Unknown Album",  # We don't extract this from m3u
+                    "album": album,
                     "title": title,
                     "path": path,
                     "extinf": metadata,
@@ -165,6 +169,32 @@ def parse_m3u(filepath):
             i += 1
     
     return tracks
+
+
+def extract_album_from_path(path):
+    """Extract album name from file path.
+    
+    Paths look like: ./artist/album/track.mp3
+    Returns the second directory component if available.
+    """
+    # Normalize slashes
+    path = path.replace("\\", "/")
+    
+    # Remove leading ./
+    path = path.lstrip("./")
+    
+    # Split by /
+    parts = path.split("/")
+    
+    # Try to get album (second component if 3+ parts, or Unknown)
+    if len(parts) >= 3:
+        # Second component is likely the album
+        return parts[1]
+    elif len(parts) == 2:
+        # Only artist/track - use part of filename as album guess
+        return parts[0]
+    else:
+        return "Unknown Album"
 
 
 # ===== Resolution & Reporting =====
@@ -196,11 +226,11 @@ def resolve_playlist(playlist_path):
         real_path = find_real_track_path(MUSIC_ROOT, artist, album, title)
         
         if real_path:
-            status = "✓ RESOLVED"
+            status = "RESOLVED"
             resolved_count += 1
             debug(f"  {original_path} → {real_path}")
         else:
-            status = "✗ NOT FOUND"
+            status = "NOT FOUND"
             unresolved.append((artist, title, original_path))
             debug(f"  Could not resolve: {artist}/{album}/{title}")
         
