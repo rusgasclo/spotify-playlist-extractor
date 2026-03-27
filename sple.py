@@ -5,9 +5,9 @@ import re
 import os
 from resolve_tracks import find_real_track_path
 
-USER_PROFILE_URL = "https://open.spotify.com/user/XXXXXX/playlists" #"https://open.spotify.com/user/XXXXX/playlists" OR "https://open.spotify.com/playlist/XXXXXXXXXXXXXXXX" # <-- change this to your Spotify playlists page or a specific playlist URL
+USER_PROFILE_URL = "" #"https://open.spotify.com/user/XXXXX/playlists" OR "https://open.spotify.com/playlist/XXXXXXXXXXXXXXXX" # <-- change this to your Spotify playlists page or a specific playlist URL
 MUSIC_ROOT = r""  # <-- change this to your music library root
-
+HYBRID_MODE = True  # Enable second-pass search if normal album match fails. This will search all albums by the artist for the track if the album match fails ##currently not in use all seaches are hybrid mode
 DEBUG = True
 
 def debug(*args):
@@ -519,7 +519,8 @@ def write_m3u(playlist_name, tracks, MUSIC_ROOT):
                 MUSIC_ROOT,
                 safe_artist,
                 safe_album,
-                safe_title
+                safe_title,
+                HYBRID_MODE
             )
 
             # Write EXTINF

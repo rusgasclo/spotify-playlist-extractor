@@ -12,33 +12,30 @@ import os
 import re
 import sys
 import argparse
-from pathlib import Path
+from mutagen import File as MutagenFile
 
 # ===== Configuration =====
 MUSIC_ROOT = r""  # <-- change this to your music library root
+HYBRID_MODE = True  # Enable second-pass search if normal album match fails ##currently not in use all seaches are hybrid mode
 DEBUG = True
 
 def debug(*args):
     if DEBUG:
         print("[DEBUG]", *args)
 
-
 # ===== Helper Functions (from sple.py) =====
 
 def normalize_path(path):
-    """Normalize slashes and lowercase for consistent matching."""
     path = path.replace("\\", "/")
     path = re.sub(r"/+", "/", path)
     return path.lower()
-
 
 def normalize_text(s):
     """Normalize text for fuzzy matching (remove punctuation, lowercase)."""
     return re.sub(r"[^a-z0-9]", "", normalize_path(s))
 
-
 def find_best_match(root, target):
-    """Return the best matching folder inside root."""
+    """Return the best matching folder inside root with a minimum similarity threshold."""
     if not os.path.isdir(root):
         return None
 
@@ -53,11 +50,21 @@ def find_best_match(root, target):
 
         norm_folder = normalize_text(folder)
 
+        # Basic fuzzy scoring
         score = 0
         if norm_target in norm_folder:
             score += 2
         if norm_folder in norm_target:
             score += 1
+
+        # Compute overlap ratio
+        overlap = len(set(norm_target) & set(norm_folder))
+        max_len = max(len(norm_target), len(norm_folder))
+        similarity = overlap / max_len if max_len else 0
+
+        # Reject weak matches
+        if score < 2 and similarity < 0.5:
+            continue
 
         if score > best_score:
             best_score = score
@@ -65,52 +72,208 @@ def find_best_match(root, target):
 
     return best
 
+def strip_soundtrack_noise(name):
+    noise = [
+        "music from the motion picture",
+        "original motion picture soundtrack",
+        "motion picture soundtrack",
+        "original soundtrack",
+        "soundtrack",
+        "ost",
+        "deluxe edition",
+        "expanded edition",
+        "special edition",
+        "remastered",
+        "edition"
+    ]
 
-def find_real_track_path(MUSIC_ROOT, artist, album, title):
-    """Find a real track path in the music library based on metadata."""
-    # Keep original MUSIC_ROOT for filesystem operations
+    n = name.lower()
 
-    # Candidate artist folders:
-    candidates = []
+    for word in noise:
+        n = n.replace(word, "")
 
-    # 1. Try the actual artist
-    artist_folder = find_best_match(MUSIC_ROOT, artist)
-    if artist_folder:
-        candidates.append(os.path.join(MUSIC_ROOT, artist_folder))
+    # THEN normalize
+    return normalize_text(n)
 
-    # 2. Try "Various Artists" for compilations
-    va_folder = find_best_match(MUSIC_ROOT, "Various Artists")
-    if va_folder:
-        candidates.append(os.path.join(MUSIC_ROOT, va_folder))
+def clean_track_title(title):
+    title = re.sub(r"\(feat[^\)]*\)", "", title, flags=re.IGNORECASE)
+    t = normalize_text(title)
 
-    # Normalize title for matching
-    norm_title = normalize_text(title)
+    soundtrack_terms = [
+        "musicfromthemotionpicture",
+        "fromthemotionpicture",
+        "originalmotionpicturesoundtrack",
+        "motionpicturesoundtrack",
+        "originalsoundtrack",
+        "soundtrack",
+        "ost",
+    ]
+    for term in soundtrack_terms:
+        t = t.replace(term, "")
 
-    # Search each candidate artist folder
-    for artist_path in candidates:
-        album_folder = find_best_match(artist_path, album)
-        if not album_folder:
-            continue
+    edition_terms = [
+        "deluxeedition",
+        "expandededition",
+        "specialedition",
+        "remastered",
+        "remaster",
+        "bonustrack",
+        "singleversion",
+        "radioedit",
+        "liveat",
+        "livefrom",
+        "live",
+    ]
+    for term in edition_terms:
+        t = t.replace(term, "")
 
+    return normalize_text(t).strip()
+
+
+def clean_artist_name(name):
+    n = name.lower().strip()
+    n = n.replace("&", "and")
+    if n.startswith("the "):
+        n = n[4:]
+    return normalize_text(n)
+
+
+def metadata_artist_matches(filepath, artist):
+    try:
+        raw = MutagenFile(filepath)
+        easy = MutagenFile(filepath, easy=True)
+
+        target = clean_artist_name(artist)
+        candidates = []
+
+        # --- ID3v2.3 raw frames (MP3) ---
+        if raw and hasattr(raw, "tags") and raw.tags:
+            for key, value in raw.tags.items():
+                k = key.lower()
+
+                # Standard artist frames
+                if k.startswith("tpe1") and hasattr(value, "text"):
+                    candidates.extend(value.text)
+                if k.startswith("tpe2") and hasattr(value, "text"):
+                    candidates.extend(value.text)
+
+                # MusicBrainz multi-artist frames stored as TXXX
+                if k.startswith("txxx") and hasattr(value, "desc"):
+                    desc = value.desc.lower()
+                    if desc in ("artists", "artist", "artistsort", "artist sort order"):
+                        if hasattr(value, "text"):
+                            candidates.extend(value.text)
+
+        # --- FLAC/M4A/Vorbis easy tags ---
+        if easy:
+            for key in (
+                "artist",
+                "artists",
+                "albumartist",
+                "performer",
+                "composer",
+                "artistsort",
+                "artistsortorder",
+                "artist sort order",
+            ):
+                if key in easy:
+                    candidates.extend(easy[key])
+
+        # --- CRITICAL: split BEFORE normalization ---
+        split_candidates = []
+        for c in candidates:
+            parts = re.split(
+                r"[,&/]|feat\.?|featuring|with",
+                c,
+                flags=re.IGNORECASE
+            )
+            split_candidates.extend(parts)
+
+        # Clean + normalize each candidate
+        cleaned = [clean_artist_name(c) for c in split_candidates if c.strip()]
+
+        # Exact match OR prefix match OR primary-artist match
+        for c in cleaned:
+            if not c:  # ignore empty strings
+                continue
+
+            if c == target:
+                return True
+            if c.startswith(target):
+                return True
+            if target.startswith(c):
+                return True
+
+        return False
+
+    except Exception:
+        return False
+
+def find_real_track_path(MUSIC_ROOT, artist, album, title, HYBRID_MODE):
+    clean_title = clean_track_title(title)
+    norm_title = clean_title
+
+    def title_matches(fname):
+        base = os.path.splitext(fname)[0]
+        norm_file = normalize_text(base)
+
+        if norm_file == norm_title:
+            return True
+
+        stripped = norm_file.lstrip("0123456789")
+        if stripped == norm_title:
+            return True
+
+        if f"-{norm_title}-" in f"-{norm_file}-":
+            return True
+
+        return False
+
+    def search_album(artist_path, album_folder):
         album_path = os.path.join(artist_path, album_folder)
+        if not os.path.isdir(album_path):
+            return None
 
-        # Look for matching track
-        for fname in os.listdir(album_path):
+        for fname in sorted(os.listdir(album_path)):
             if not fname.lower().endswith((".flac", ".mp3", ".m4a", ".ogg", ".wav", ".opus")):
                 continue
 
-            norm_fname = normalize_text(fname)
+            full_path = os.path.join(album_path, fname)
 
-            if norm_title in norm_fname:
-                # Build relative path using actual folder names
-                rel_artist = os.path.basename(artist_path)
-                rel_album = album_folder
-                rel_path = os.path.join(rel_artist, rel_album, fname)
+            if title_matches(fname) and metadata_artist_matches(full_path, artist):
+                return f"{os.path.basename(artist_path)}/{album_folder}/{fname}"
 
-                return normalize_path(rel_path)
+        return None
+
+    # 1. Search the specified album
+    artist_folder = find_best_match(MUSIC_ROOT, artist)
+    if artist_folder:
+        artist_path = os.path.join(MUSIC_ROOT, artist_folder)
+        album_folder = find_best_match(artist_path, album)
+
+        if album_folder:
+            result = search_album(artist_path, album_folder)
+            if result:
+                return result
+
+    # 2. Search all albums by the artist
+    if artist_folder:
+        artist_path = os.path.join(MUSIC_ROOT, artist_folder)
+        for album_folder in sorted(os.listdir(artist_path)):
+            result = search_album(artist_path, album_folder)
+            if result:
+                return result
+
+    # 3. Search all Various Artists albums
+    va_folder = find_best_match(MUSIC_ROOT, "Various Artists")
+    if va_folder:
+        va_path = os.path.join(MUSIC_ROOT, va_folder)
+        for album_folder in sorted(os.listdir(va_path)):
+            result = search_album(va_path, album_folder)
+            if result:
+                return result
 
     return None
-
 
 # ===== M3U Parsing =====
 
@@ -200,46 +363,61 @@ def extract_album_from_path(path):
 # ===== Resolution & Reporting =====
 
 def resolve_playlist(playlist_path):
-    """Attempt to resolve all tracks in a playlist."""
+    """Resolve tracks and write updated playlist back to disk."""
+
     print(f"\n{'='*70}")
     print(f"Processing: {os.path.basename(playlist_path)}")
     print(f"{'='*70}")
-    
+
+    # Read original lines
+    with open(playlist_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
     tracks = parse_m3u(playlist_path)
-    
+
     if not tracks:
         print("No tracks found in this playlist.")
         return
-    
+
     print(f"Found {len(tracks)} tracks.\n")
-    
+
     resolved_count = 0
     unresolved = []
-    
+
+    # We will build a new list of lines to write back
+    new_lines = lines.copy()
+
     for idx, track in enumerate(tracks, 1):
         artist = track["artist"]
         title = track["title"]
         album = track["album"]
         original_path = track["path"]
-        
-        # Try to resolve
-        real_path = find_real_track_path(MUSIC_ROOT, artist, album, title)
-        
+        line_index = track["original_line"] + 1  # path is always next line
+
+        real_path = find_real_track_path(MUSIC_ROOT, artist, album, title, HYBRID_MODE)
+
         if real_path:
             status = "RESOLVED"
             resolved_count += 1
+
+            # Replace the path line in the playlist
+            new_lines[line_index] = f"./{real_path}\n"
+
             debug(f"  {original_path} → {real_path}")
         else:
             status = "NOT FOUND"
             unresolved.append((artist, title, original_path))
             debug(f"  Could not resolve: {artist}/{album}/{title}")
-        
+
         print(f"[{idx:3d}/{len(tracks)}] {status} - {artist} - {title}")
-    
-    # Summary
+
+    # Write updated playlist back to disk
+    with open(playlist_path, "w", encoding="utf-8") as f:
+        f.writelines(new_lines)
+
     print(f"\n{'-'*70}")
     print(f"Summary: {resolved_count}/{len(tracks)} tracks resolved")
-    
+
     if unresolved:
         print(f"\nUnresolved tracks ({len(unresolved)}):")
         for artist, title, path in unresolved:
@@ -248,7 +426,7 @@ def resolve_playlist(playlist_path):
 
 def main():
     # Declare globals at the start
-    global MUSIC_ROOT, DEBUG
+    global MUSIC_ROOT, DEBUG, HYBRID_MODE
     
     parser = argparse.ArgumentParser(
         description="Resolve tracks in Spotify m3u playlists to local music files."
@@ -269,6 +447,11 @@ def main():
         "--debug",
         action="store_true",
         help="Enable debug output"
+    )
+    parser.add_argument(
+        "--hybrid",
+        action="store_true",
+        help="Enable hybrid mode (second-pass search)"
     )
     
     args = parser.parse_args()
